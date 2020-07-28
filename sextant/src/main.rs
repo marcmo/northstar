@@ -18,9 +18,12 @@ use anyhow::{anyhow, Context, Error, Result};
 use fs_extra::dir::{copy, CopyOptions};
 use log::info;
 use north_common::manifest::Manifest;
-use rand::RngCore;
+use rand::{AsByteSliceMut, RngCore};
 use serde_yaml;
+use sha2::{Digest, Sha256};
 use std::fs::File;
+use std::io::SeekFrom::Start;
+use std::io::{BufReader, Read, Seek, Write};
 use std::path::Path;
 use std::process::Command;
 use std::{fs, path::PathBuf, str::FromStr};
@@ -76,6 +79,21 @@ enum Opt {
 }
 
 // TODO: all from here: move to its own file
+
+const DIGEST_SIZE: usize = 32;
+const BLOCK_SIZE: u64 = 4096;
+
+fn main() -> Result<()> {
+    env_logger::init();
+    let opt = Opt::from_args();
+    info!("{:#?}", opt);
+    match opt {
+        Opt::Pack { dir, out } => pack_cmd(&dir, &out),
+        _ => {
+            unimplemented!();
+        }
+    }
+}
 
 #[derive(PartialEq)]
 enum FsType {
@@ -336,11 +354,10 @@ fn pack(
     let filesystem_size = fs::metadata(fsimg_path)?.len();
 
     // append verity header and hash tree to filesystem image
-    const DIGEST_SIZE: usize = 32;
-    const BLOCK_SIZE: u64 = 4096;
     assert_eq!(filesystem_size % BLOCK_SIZE, 0);
-    let data_blocks = filesystem_size / BLOCK_SIZE;
+    let data_blocks: u64 = filesystem_size / BLOCK_SIZE;
     let uuid = Uuid::new_v4();
+    dbg!(uuid);
     let mut salt = [0u8; DIGEST_SIZE];
     rand::thread_rng().fill_bytes(&mut salt);
     println!("filesystem_size={}", filesystem_size);
@@ -357,18 +374,44 @@ fn pack(
         println!("hash_level_offset={}", hash_level_offset);
     }
 
-    // TODO: contine here
-    let fsimg = File::open(&fsimg_path)?;
-    generate_hash_tree(
-        &fsimg,
-        filesystem_size,
-        BLOCK_SIZE,
-        &salt,
-        &hash_level_offsets,
-        tree_size,
-    );
+    {
+        let mut fsimg = File::open(&fsimg_path)?;
+        let (verity_hash, hash_tree) = generate_hash_tree(
+            &fsimg,
+            filesystem_size,
+            BLOCK_SIZE,
+            &salt,
+            &hash_level_offsets,
+            tree_size,
+        );
 
-    // create hashes YAML
+        /* ['verity', 1, 1, uuid.gsub('-', ''), 'sha256', 4096, 4096, data_blocks, 32, salt, '']
+         * .pack('a8 L L H32 a32 L L Q S x6 a256 a3752')
+         * (https://ruby-doc.org/core-2.7.1/Array.html#method-i-pack) */
+        fsimg.seek(Start(filesystem_size));
+        fsimg.write("verity".as_bytes());
+        fsimg.write(&[0_u8, 0_u8]);
+        fsimg.write(&1_u32.to_ne_bytes());
+        fsimg.write(&1_u32.to_ne_bytes());
+        fsimg.write(uuid.to_string().replace("-", "").as_bytes());
+        fsimg.write("sha256".as_bytes());
+        fsimg.write(&4096_u32.to_ne_bytes());
+        fsimg.write(&4096_u32.to_ne_bytes());
+        fsimg.write(&data_blocks.to_ne_bytes());
+        fsimg.write(&32_u16.to_ne_bytes());
+        fsimg.write(vec![0_u8; 6].as_ref());
+        fsimg.write(&salt);
+        fsimg.write(&vec![0_u8; 256 - salt.len()]);
+        fsimg.write(&vec![0_u8; 3752]);
+
+        fsimg.write(&hash_tree);
+    }
+
+    // TODO: create hashes YAML
+
+    // TODO: sign hashes
+
+    // TODO: create zip
 
     Ok(())
 }
@@ -413,22 +456,78 @@ fn generate_hash_tree(
     salt: &[u8; 32],
     hash_level_offsets: &Vec<usize>,
     tree_size: usize,
-) {
+) -> (Vec<u8>, Vec<u8>) {
+    let mut hash_ret = vec![0_u8; tree_size];
+    let hash_src_offset = 0;
+    let mut hash_src_size = image_size;
+    let mut level_num = 0;
+    let mut reader = BufReader::new(image);
+    let mut level_output: Vec<u8> = vec![];
+
+    while hash_src_size > block_size {
+        let mut level_output_list: Vec<[u8; DIGEST_SIZE]> = vec![];
+        let mut remaining = hash_src_size;
+        while remaining > 0 {
+            let mut hasher = Sha256::new();
+            hasher.update(salt);
+
+            let mut data_len = 0;
+            if level_num == 0 {
+                let offset = hash_src_offset + hash_src_size - remaining;
+                data_len = std::cmp::min(remaining, block_size);
+                let mut data = vec![0_u8; data_len as usize];
+                reader.seek(Start(offset));
+                reader.read(&mut data);
+                hasher.update(&data);
+            } else {
+                let offset =
+                    hash_level_offsets[level_num - 1] + hash_src_size as usize - remaining as usize;
+                data_len = block_size;
+                dbg!(offset);
+                dbg!(data_len);
+                dbg!(offset + data_len as usize);
+                dbg!(tree_size);
+                dbg!(hash_ret.len());
+                hasher.update(&hash_ret[offset..offset + data_len as usize]);
+            }
+
+            remaining = remaining - data_len;
+            if data_len < block_size {
+                let zeros = vec![0_u8; (block_size - data_len) as usize];
+                hasher.update(zeros);
+            }
+            let current_digest = [0; DIGEST_SIZE];
+            hasher.write(&current_digest);
+            level_output_list.push(current_digest);
+        }
+
+        level_output = level_output_list
+            .iter()
+            .flat_map(|s| s.iter().copied())
+            .collect();
+        let padding_needed =
+            (round_up_to_multiple(level_output.len(), block_size as usize) - level_output.len());
+        level_output.append(&mut vec![0_u8; padding_needed]);
+
+        let offset = hash_level_offsets[level_num];
+        hash_ret[offset..offset + level_output.len()].copy_from_slice(level_output.as_slice());
+
+        hash_src_size = level_output.len() as u64;
+        level_num = level_num + 1;
+    }
+
+    let digest = Sha256::digest(
+        &salt
+            .iter()
+            .copied()
+            .chain(level_output.iter().copied())
+            .collect::<Vec<u8>>(),
+    );
+
+    (digest.to_vec(), hash_ret)
 }
 
 fn round_up_to_multiple(number: usize, factor: usize) -> usize {
-    let round_down = (number + factor - 1);
-    round_down - (round_down % factor)
-}
-
-fn main() -> Result<()> {
-    env_logger::init();
-    let opt = Opt::from_args();
-    info!("{:#?}", opt);
-    match opt {
-        Opt::Pack { dir, out } => pack_cmd(&dir, &out),
-        _ => {
-            unimplemented!();
-        }
-    }
+    let round_down_to_multiple = (number + factor - 1);
+    round_down_to_multiple - (round_down_to_multiple % factor)
 }
