@@ -2,6 +2,7 @@
 # Use the ferris interpreter from the resouce listed below
 name: ferris_says_hello
 version: 0.0.3
+arch: x86_64-unknown-linux-gnu
 init: /bin/ferris
 # Pass the filename with the hello message
 args:
