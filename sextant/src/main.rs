@@ -16,6 +16,7 @@
 
 use anyhow::{anyhow, Context, Error, Result};
 use fs_extra::dir::{copy, CopyOptions};
+use itertools::Itertools;
 use log::info;
 use north_common::manifest::Manifest;
 use rand::{AsByteSliceMut, RngCore};
@@ -26,7 +27,7 @@ use std::io::SeekFrom::Start;
 use std::io::{BufReader, Read, Seek, Write};
 use std::path::Path;
 use std::process::Command;
-use std::{fs, path::PathBuf, str::FromStr};
+use std::{fs, io, path::PathBuf, str::FromStr};
 use structopt::StructOpt;
 use tempdir::TempDir;
 use uuid::Uuid;
@@ -362,41 +363,53 @@ fn pack(
         log::debug!("hash_level_offset={}", hash_level_offset);
     }
 
-    {
-        let mut fsimg = File::open(&fsimg_path)?;
-        let (verity_hash, hash_tree) = generate_hash_tree(
-            &fsimg,
-            filesystem_size,
-            BLOCK_SIZE,
-            &salt,
-            &hash_level_offsets,
-            tree_size,
-        );
+    let mut fsimg = File::open(&fsimg_path)?;
+    let (verity_hash, hash_tree) = generate_hash_tree(
+        &fsimg,
+        filesystem_size,
+        BLOCK_SIZE,
+        &salt,
+        &hash_level_offsets,
+        tree_size,
+    );
 
-        /* ['verity', 1, 1, uuid.gsub('-', ''), 'sha256', 4096, 4096, data_blocks, 32, salt, '']
-         * .pack('a8 L L H32 a32 L L Q S x6 a256 a3752')
-         * (https://ruby-doc.org/core-2.7.1/Array.html#method-i-pack) */
-        fsimg.seek(Start(filesystem_size));
-        fsimg.write("verity".as_bytes());
-        fsimg.write(&[0_u8, 0_u8]);
-        fsimg.write(&1_u32.to_ne_bytes());
-        fsimg.write(&1_u32.to_ne_bytes());
-        fsimg.write(uuid.to_string().replace("-", "").as_bytes());
-        fsimg.write("sha256".as_bytes());
-        fsimg.write(&4096_u32.to_ne_bytes());
-        fsimg.write(&4096_u32.to_ne_bytes());
-        fsimg.write(&data_blocks.to_ne_bytes());
-        fsimg.write(&32_u16.to_ne_bytes());
-        fsimg.write(vec![0_u8; 6].as_ref());
-        fsimg.write(&salt);
-        fsimg.write(&vec![0_u8; 256 - salt.len()]);
-        fsimg.write(&vec![0_u8; 3752]);
+    /* ['verity', 1, 1, uuid.gsub('-', ''), 'sha256', 4096, 4096, data_blocks, 32, salt, '']
+     * .pack('a8 L L H32 a32 L L Q S x6 a256 a3752')
+     * (https://ruby-doc.org/core-2.7.1/Array.html#method-i-pack) */
+    fsimg.seek(Start(filesystem_size));
+    fsimg.write("verity".as_bytes());
+    fsimg.write(&[0_u8, 0_u8]);
+    fsimg.write(&1_u32.to_ne_bytes());
+    fsimg.write(&1_u32.to_ne_bytes());
+    fsimg.write(uuid.to_string().replace("-", "").as_bytes());
+    fsimg.write("sha256".as_bytes());
+    fsimg.write(&4096_u32.to_ne_bytes());
+    fsimg.write(&4096_u32.to_ne_bytes());
+    fsimg.write(&data_blocks.to_ne_bytes());
+    fsimg.write(&32_u16.to_ne_bytes());
+    fsimg.write(vec![0_u8; 6].as_ref());
+    fsimg.write(&salt);
+    fsimg.write(&vec![0_u8; 256 - salt.len()]);
+    fsimg.write(&vec![0_u8; 3752]);
 
-        // println!("hash_tree={:?}", &hash_tree);
-        fsimg.write(&hash_tree);
-    }
+    // println!("hash_tree={:?}", &hash_tree);
+    fsimg.write(&hash_tree);
 
-    // TODO: create hashes YAML
+    // create hashes YAML
+    let mut sha256 = Sha256::new();
+    io::copy(&mut File::open(&tmp_manifest_dir)?, &mut sha256)?;
+    let manifest_hash = sha256.finalize();
+    let mut sha256 = Sha256::new();
+    io::copy(&mut fsimg, &mut sha256)?;
+    let fs_hash = sha256.finalize();
+    let hashes = format!(
+        "manifest.yaml:\n  hash: {}\nfs.img\n  hash: {:x?}\n  verity-hash: {:x?}\n  verity-offset: {}\n",
+        manifest_hash.iter().format(""),
+        fs_hash.iter().format(""),
+        verity_hash.iter().format(""),
+        filesystem_size
+    );
+    log::debug!("hashes=\n{}", hashes);
 
     // TODO: sign hashes
 
@@ -457,8 +470,8 @@ fn generate_hash_tree(
         let mut level_output_list: Vec<[u8; DIGEST_SIZE]> = vec![];
         let mut remaining = hash_src_size;
         while remaining > 0 {
-            let mut hasher = Sha256::new();
-            hasher.update(salt);
+            let mut sha256 = Sha256::new();
+            sha256.update(salt);
 
             let mut data_len = 0;
             if level_num == 0 {
@@ -467,7 +480,7 @@ fn generate_hash_tree(
                 let mut data = vec![0_u8; data_len as usize];
                 reader.seek(Start(offset));
                 reader.read(&mut data);
-                hasher.update(&data);
+                sha256.update(&data);
             } else {
                 let offset =
                     hash_level_offsets[level_num - 1] + hash_src_size as usize - remaining as usize;
@@ -477,15 +490,15 @@ fn generate_hash_tree(
                 log::debug!("offset + data_len={}", offset + data_len as usize);
                 log::debug!("tree_size={}", &tree_size);
                 log::debug!("hash_ret.len()={}", hash_ret.len());
-                hasher.update(&hash_ret[offset..offset + data_len as usize]);
+                sha256.update(&hash_ret[offset..offset + data_len as usize]);
             }
 
             remaining = remaining - data_len;
             if data_len < block_size {
                 let zeros = vec![0_u8; (block_size - data_len) as usize];
-                hasher.update(zeros);
+                sha256.update(zeros);
             }
-            level_output_list.push(hasher.finalize().into());
+            level_output_list.push(sha256.finalize().into());
         }
 
         level_output = level_output_list
