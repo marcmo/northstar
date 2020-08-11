@@ -144,7 +144,7 @@ fn pack_containers(
     let mut src_dirs = fs::read_dir(container_src_dir)?
         .map(|res| res.map(|e| e.path()))
         .filter_map(Result::ok)
-        .filter(|r| r.join("manifest.yaml").exists())
+        .filter(|mut r| r.join("manifest.yaml").exists())
         .collect::<Vec<_>>();
     src_dirs.sort();
     for src_dir in src_dirs {
@@ -345,8 +345,13 @@ fn pack(
     // append verity header and hash tree to filesystem image
     assert_eq!(filesystem_size % BLOCK_SIZE, 0);
     let data_blocks: u64 = filesystem_size / BLOCK_SIZE;
+    log::debug!("data_blocks={}", &data_blocks);
     let uuid = Uuid::new_v4();
     log::debug!("uuid={}", &uuid);
+    log::debug!(
+        "uuid_decoded={:?}",
+        hex::decode(uuid.to_string().replace("-", ""))
+    );
     let mut salt = [0u8; DIGEST_SIZE];
     rand::thread_rng().fill_bytes(&mut salt);
     log::debug!("filesystem_size={}", filesystem_size);
@@ -372,27 +377,30 @@ fn pack(
         &hash_level_offsets,
         tree_size,
     );
+    log::debug!("verity_hash.len()={}", verity_hash.len());
+    log::debug!("hash_tree.len()={}", hash_tree.len());
 
     /* ['verity', 1, 1, uuid.gsub('-', ''), 'sha256', 4096, 4096, data_blocks, 32, salt, '']
      * .pack('a8 L L H32 a32 L L Q S x6 a256 a3752')
+     * (https://gitlab.com/cryptsetup/cryptsetup/-/wikis/DMVerity#verity-superblock-format)
      * (https://ruby-doc.org/core-2.7.1/Array.html#method-i-pack) */
     fsimg.seek(Start(filesystem_size));
     fsimg.write("verity".as_bytes());
     fsimg.write(&[0_u8, 0_u8]);
     fsimg.write(&1_u32.to_ne_bytes());
     fsimg.write(&1_u32.to_ne_bytes());
-    fsimg.write(uuid.to_string().replace("-", "").as_bytes());
+    fsimg.write(&hex::decode(uuid.to_string().replace("-", ""))?);
     fsimg.write("sha256".as_bytes());
+    fsimg.write(&vec![0_u8; 26]);
     fsimg.write(&4096_u32.to_ne_bytes());
     fsimg.write(&4096_u32.to_ne_bytes());
     fsimg.write(&data_blocks.to_ne_bytes());
     fsimg.write(&32_u16.to_ne_bytes());
-    fsimg.write(vec![0_u8; 6].as_ref());
+    fsimg.write(&vec![0_u8; 6]);
     fsimg.write(&salt);
     fsimg.write(&vec![0_u8; 256 - salt.len()]);
     fsimg.write(&vec![0_u8; 3752]);
 
-    // println!("hash_tree={:?}", &hash_tree);
     fsimg.write(&hash_tree);
 
     // create hashes YAML
@@ -403,7 +411,8 @@ fn pack(
     io::copy(&mut fsimg, &mut sha256)?;
     let fs_hash = sha256.finalize();
     let hashes = format!(
-        "manifest.yaml:\n  hash: {}\nfs.img\n  hash: {:x?}\n  verity-hash: {:x?}\n  verity-offset: {}\n",
+        "manifest.yaml:\n  hash: {}\n\
+         fs.img\n  hash: {:x?}\n  verity-hash: {:x?}\n  verity-offset: {}\n",
         manifest_hash.iter().format(""),
         fs_hash.iter().format(""),
         verity_hash.iter().format(""),
