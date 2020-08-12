@@ -22,6 +22,9 @@ use north_common::manifest::Manifest;
 use rand::{AsByteSliceMut, RngCore};
 use serde_yaml;
 use sha2::{Digest, Sha256};
+use sodiumoxide::crypto::sign;
+use sodiumoxide::crypto::sign::ed25519::SecretKey;
+use sodiumoxide::crypto::sign::{keypair_from_seed, sign, Seed, Signature, SEEDBYTES};
 use std::fs::File;
 use std::io::SeekFrom::Start;
 use std::io::{BufReader, Read, Seek, Write};
@@ -136,10 +139,20 @@ fn pack_containers(
     log::debug!("key_dir={}", key_dir.display());
     log::debug!("signing_key_name={}", signing_key_name);
 
+    // read signing key
     let sign_key_path = key_dir.join(signing_key_name).with_extension("key");
-    log::debug!("open file {}", sign_key_path.display());
-    let sign_key = File::open(&sign_key_path)?;
-    log::debug!("sign_key.len()={}", sign_key.metadata().unwrap().len());
+    log::debug!("opening file {}", sign_key_path.display());
+    let mut sign_key_file = File::open(&sign_key_path)?;
+    log::debug!(
+        "sign_key_file.len()={}",
+        sign_key_file.metadata().unwrap().len()
+    );
+    let mut raw_signing_key_seed = [0u8; SEEDBYTES];
+    let read_bytes = sign_key_file.read(&mut raw_signing_key_seed)?;
+    log::debug!("read_bytes={}", read_bytes);
+    log::debug!("signing_key_seed={:02x?}", raw_signing_key_seed.to_vec());
+    let signing_key_seed = Seed::from_slice(&raw_signing_key_seed).unwrap();
+    let (_, signing_key) = keypair_from_seed(&signing_key_seed);
 
     let mut src_dirs = fs::read_dir(container_src_dir)?
         .map(|res| res.map(|e| e.path()))
@@ -148,15 +161,7 @@ fn pack_containers(
         .collect::<Vec<_>>();
     src_dirs.sort();
     for src_dir in src_dirs {
-        pack(
-            &src_dir,
-            &registry_dir,
-            &sign_key,
-            &signing_key_name,
-            fs_type,
-            uid,
-            gid,
-        )?;
+        pack(&src_dir, &registry_dir, &signing_key, fs_type, uid, gid)?;
     }
 
     Ok(())
@@ -165,8 +170,7 @@ fn pack_containers(
 fn pack(
     src_dir: &Path,
     registry_dir: &Path,
-    signing_key: &File,
-    signing_key_name: &str,
+    signing_key: &SecretKey,
     fs_type: FsType,
     uid: u32,
     gid: u32,
@@ -182,7 +186,6 @@ fn pack(
     log::debug!("Packing '{}'", component_name);
     log::debug!("src_dir={}", src_dir.display());
     log::debug!("registry_dir={}", registry_dir.display());
-    log::debug!("signing_key_name={}", signing_key_name);
 
     // load manifest
     let manifest_file_path = src_dir.join("manifest").with_extension("yaml");
@@ -411,8 +414,8 @@ fn pack(
     io::copy(&mut fsimg, &mut sha256)?;
     let fs_hash = sha256.finalize();
     let hashes = format!(
-        "manifest.yaml:\n  hash: {}\n\
-         fs.img\n  hash: {:x?}\n  verity-hash: {:x?}\n  verity-offset: {}\n",
+        "manifest.yaml:\n  hash: {:02x?}\n\
+         fs.img\n  hash: {:02x?}\n  verity-hash: {:02x?}\n  verity-offset: {}\n",
         manifest_hash.iter().format(""),
         fs_hash.iter().format(""),
         verity_hash.iter().format(""),
@@ -420,7 +423,8 @@ fn pack(
     );
     log::debug!("hashes=\n{}", hashes);
 
-    // TODO: sign hashes
+    // sign hashes
+    let signature: Signature = sign::sign_detached(hashes.as_bytes(), &signing_key);
 
     // TODO: create zip
 
