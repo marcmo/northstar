@@ -424,7 +424,15 @@ fn pack(
     log::debug!("hashes=\n{}", hashes);
 
     // sign hashes
-    let signature: Signature = sign::sign_detached(hashes.as_bytes(), &signing_key);
+    let signature = sign::sign_detached(hashes.as_bytes(), &signing_key);
+    log::debug!("signature.as_ref().len()={}", signature.as_ref().len());
+    let signature_base64 = base64::encode(signature);
+    let key_id = "north";
+    let signatures = format!(
+        "{}---\nkey: {}\nsignature: {}",
+        &hashes, &key_id, &signature_base64
+    );
+    log::debug!("signatures=\n{}", &signatures);
 
     // TODO: create zip
 
