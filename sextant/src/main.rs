@@ -26,7 +26,7 @@ use sha2::{Digest, Sha256};
 use sodiumoxide::crypto::sign;
 use sodiumoxide::crypto::sign::ed25519::SecretKey;
 use sodiumoxide::crypto::sign::{keypair_from_seed, sign, Seed, Signature, SEEDBYTES};
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::SeekFrom::Start;
 use std::io::{BufReader, Read, Seek, Write};
 use std::path::Path;
@@ -349,7 +349,6 @@ fn pack(
     // append verity header and hash tree to filesystem image
     assert_eq!(filesystem_size % BLOCK_SIZE, 0);
     let data_blocks: u64 = filesystem_size / BLOCK_SIZE;
-    debug!("data_blocks={}", &data_blocks);
     let uuid = Uuid::new_v4();
     debug!("uuid={}", &uuid);
     debug!(
@@ -360,7 +359,7 @@ fn pack(
     rand::thread_rng().fill_bytes(&mut salt);
     debug!("filesystem_size={}", filesystem_size);
     debug!("BLOCK_SIZE={}", BLOCK_SIZE);
-    debug!("DIGEST_SIZE={}", DIGEST_SIZE);
+    debug!("data_blocks={}", &data_blocks);
     let (hash_level_offsets, tree_size) = calc_hash_level_offsets(
         filesystem_size as usize,
         BLOCK_SIZE as usize,
@@ -372,9 +371,8 @@ fn pack(
         debug!("hash_level_offset={}", hash_level_offset);
     }
 
-    let mut fsimg = File::open(&fsimg_path)?;
     let (verity_hash, hash_tree) = generate_hash_tree(
-        &fsimg,
+        &File::open(&fsimg_path)?,
         filesystem_size,
         BLOCK_SIZE,
         &salt,
@@ -384,36 +382,43 @@ fn pack(
     debug!("verity_hash.len()={}", verity_hash.len());
     debug!("hash_tree.len()={}", hash_tree.len());
 
-    /* ['verity', 1, 1, uuid.gsub('-', ''), 'sha256', 4096, 4096, data_blocks, 32, salt, '']
-     * .pack('a8 L L H32 a32 L L Q S x6 a256 a3752')
-     * (https://gitlab.com/cryptsetup/cryptsetup/-/wikis/DMVerity#verity-superblock-format)
-     * (https://ruby-doc.org/core-2.7.1/Array.html#method-i-pack) */
-    fsimg.seek(Start(filesystem_size));
-    fsimg.write("verity".as_bytes());
-    fsimg.write(&[0_u8, 0_u8]);
-    fsimg.write(&1_u32.to_ne_bytes());
-    fsimg.write(&1_u32.to_ne_bytes());
-    fsimg.write(&hex::decode(uuid.to_string().replace("-", ""))?);
-    fsimg.write("sha256".as_bytes());
-    fsimg.write(&vec![0_u8; 26]);
-    fsimg.write(&4096_u32.to_ne_bytes());
-    fsimg.write(&4096_u32.to_ne_bytes());
-    fsimg.write(&data_blocks.to_ne_bytes());
-    fsimg.write(&32_u16.to_ne_bytes());
-    fsimg.write(&vec![0_u8; 6]);
-    fsimg.write(&salt);
-    fsimg.write(&vec![0_u8; 256 - salt.len()]);
-    fsimg.write(&vec![0_u8; 3752]);
-
-    fsimg.write(&hash_tree);
-    fsimg.flush();
+    {
+        /* ['verity', 1, 1, uuid.gsub('-', ''), 'sha256', 4096, 4096, data_blocks, 32, salt, '']
+         * .pack('a8 L L H32 a32 L L Q S x6 a256 a3752')
+         * (https://gitlab.com/cryptsetup/cryptsetup/-/wikis/DMVerity#verity-superblock-format)
+         * (https://ruby-doc.org/core-2.7.1/Array.html#method-i-pack) */
+        let mut fsimg = OpenOptions::new()
+            .write(true)
+            .append(true)
+            .open(&fsimg_path)?;
+        // File::open(&fsimg_path)?;
+        // fsimg.seek(Start(filesystem_size));
+        // fsimg.seek(End(0));
+        fsimg.write("verity".as_bytes());
+        fsimg.write(&[0_u8, 0_u8]);
+        fsimg.write(&1_u32.to_ne_bytes());
+        fsimg.write(&1_u32.to_ne_bytes());
+        fsimg.write(&hex::decode(uuid.to_string().replace("-", ""))?);
+        fsimg.write("sha256".as_bytes());
+        fsimg.write(&vec![0_u8; 26]);
+        fsimg.write(&4096_u32.to_ne_bytes());
+        fsimg.write(&4096_u32.to_ne_bytes());
+        fsimg.write(&data_blocks.to_ne_bytes());
+        fsimg.write(&32_u16.to_ne_bytes());
+        fsimg.write(&vec![0_u8; 6]);
+        fsimg.write(&salt);
+        fsimg.write(&vec![0_u8; 256 - salt.len()]);
+        fsimg.write(&vec![0_u8; 3752]);
+        fsimg.write(&hash_tree);
+    }
 
     // create hashes YAML
     let mut sha256 = Sha256::new();
     io::copy(&mut File::open(&tmp_manifest_dir)?, &mut sha256)?;
     let manifest_hash = sha256.finalize();
     let mut sha256 = Sha256::new();
-    fsimg.seek(Start(0)); // return to start of file before hashing
+    let mut fsimg = File::open(&fsimg_path)?;
+    // fsimg.seek(Start(0)); // return to start of file before hashing
     io::copy(&mut fsimg, &mut sha256)?;
 
     let fs_hash = sha256.finalize();
@@ -459,7 +464,7 @@ fn pack(
 
     let zeros = vec![0_u8; padding as usize];
 
-    zip.start_file_from_path_with_extra_data(fsimg_path, options, &zeros);
+    zip.start_file_with_extra_data("fs.img", options, &zeros);
     let mut fsimg = File::open(&fsimg_path)?;
     let mut fsimg_cont: Vec<u8> = vec![0u8; fs::metadata(&fsimg_path).unwrap().len() as usize];
     fsimg.read(&mut fsimg_cont);
