@@ -35,6 +35,7 @@ use std::{fs, io, path::PathBuf, str::FromStr};
 use structopt::StructOpt;
 use tempdir::TempDir;
 use uuid::Uuid;
+use zip::write::FileOptions;
 
 #[derive(Debug)]
 enum Format {
@@ -144,6 +145,7 @@ fn pack_containers(
     let sign_key_path = key_dir.join(signing_key_name).with_extension("key");
     debug!("opening file {}", sign_key_path.display());
     let mut sign_key_file = File::open(&sign_key_path)?;
+    let tmp = sign_key_file.metadata()?;
     debug!(
         "sign_key_file.len()={}",
         sign_key_file.metadata().unwrap().len()
@@ -288,9 +290,6 @@ fn pack(
     // remove existing containers
     // TODO: remove all {registry}/#{name}-#{arch}-* directories
 
-    let npk_dir = registry_dir
-        .join(format!("{}-{}-{}", manifest.name, arch, manifest.version))
-        .with_extension("npk");
     let fsimg_path = &tmp_dir.path().join("fs").with_extension("img");
 
     /* The list of pseudo files is target specific.
@@ -413,7 +412,10 @@ fn pack(
     io::copy(&mut File::open(&tmp_manifest_dir)?, &mut sha256)?;
     let manifest_hash = sha256.finalize();
     let mut sha256 = Sha256::new();
-    io::copy(&mut fsimg, &mut sha256)?;
+    io::copy(&mut fsimg, &mut sha256)?; // TODO: do we have to reset fsimg's position?
+
+    fsimg.flush();
+
     let fs_hash = sha256.finalize();
     let hashes = format!(
         "manifest.yaml:\n  hash: {:02x?}\n\
@@ -436,7 +438,32 @@ fn pack(
     );
     debug!("signatures=\n{}", &signatures);
 
-    // TODO: create zip
+    // create zip
+    debug!("manifest.version={}", manifest.version);
+    let npk_dir = registry_dir
+        .join(format!("{}-{}-{}.", manifest.name, arch, manifest.version))
+        .with_extension("npk");
+    debug!("npk_dir=\n{}", &npk_dir.display());
+    let mut npk_file = File::create(&npk_dir)?;
+    let options =
+        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    let mut zip = zip::ZipWriter::new(&npk_file);
+    zip.start_file("signature.yaml", options);
+    zip.write(signatures.as_bytes());
+    zip.start_file("manifest.yaml", options);
+    let manifest_string = serde_yaml::to_string(&manifest)?;
+    zip.write(manifest_string.as_bytes());
+
+    let offset = 43 + manifest_string.len() + 44 + signatures.len() + 36; // stored
+    let padding = (offset / 4096 + 1) * 4096 - offset;
+
+    let zeros = vec![0_u8; padding as usize];
+
+    zip.start_file_from_path_with_extra_data(fsimg_path, options, &zeros);
+    let mut fsimg = File::open(&fsimg_path)?;
+    let mut fsimg_cont: Vec<u8> = vec![0u8; fs::metadata(&fsimg_path).unwrap().len() as usize];
+    fsimg.read(&mut fsimg_cont);
+    zip.write(&fsimg_cont);
 
     Ok(())
 }
