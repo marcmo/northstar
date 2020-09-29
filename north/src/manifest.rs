@@ -112,7 +112,9 @@ pub struct CGroupCpu {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CGroups {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub mem: Option<CGroupMem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cpu: Option<CGroupCpu>,
 }
 
@@ -140,22 +142,31 @@ pub struct Manifest {
     /// Target arch
     pub arch: String,
     /// Path to init
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub init: Option<std::path::PathBuf>,
     /// Additional arguments for the application invocation
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub args: Option<Vec<String>>,
     /// Environment passed to container
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub env: Option<Vec<(String, String)>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub resources: Option<Vec<Resource>>,
     /// Autostart this container upon north startup
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub autostart: Option<bool>,
     /// Action on application exit
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub on_exit: Option<OnExit>,
     /// CGroup config
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cgroups: Option<CGroups>,
     /// Seccomp configuration
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub seccomp: Option<HashMap<String, String>>,
     /// Number of instances to mount of this container
     /// The name get's extended with the instance id.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub instances: Option<u32>,
 }
 
