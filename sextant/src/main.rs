@@ -406,20 +406,20 @@ fn pack(
     fsimg.write(&vec![0_u8; 3752]);
 
     fsimg.write(&hash_tree);
+    fsimg.flush();
 
     // create hashes YAML
     let mut sha256 = Sha256::new();
     io::copy(&mut File::open(&tmp_manifest_dir)?, &mut sha256)?;
     let manifest_hash = sha256.finalize();
     let mut sha256 = Sha256::new();
-    io::copy(&mut fsimg, &mut sha256)?; // TODO: do we have to reset fsimg's position?
-
-    fsimg.flush();
+    fsimg.seek(Start(0)); // return to start of file before hashing
+    io::copy(&mut fsimg, &mut sha256)?;
 
     let fs_hash = sha256.finalize();
     let hashes = format!(
         "manifest.yaml:\n  hash: {:02x?}\n\
-         fs.img\n  hash: {:02x?}\n  verity-hash: {:02x?}\n  verity-offset: {}\n",
+         fs.img:\n  hash: {:02x?}\n  verity-hash: {:02x?}\n  verity-offset: {}\n",
         manifest_hash.iter().format(""),
         fs_hash.iter().format(""),
         verity_hash.iter().format(""),
