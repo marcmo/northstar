@@ -583,7 +583,7 @@ dependencies = [
  "curve25519-dalek",
  "ed25519",
  "rand 0.7.3",
- "serde 1.0.114",
+ "serde",
  "sha2 0.8.2",
  "zeroize",
 ]
@@ -1755,7 +1755,7 @@ dependencies = [
  "hex",
  "itertools",
  "log",
- "north_common",
+ "north",
  "rand 0.7.3",
  "serde_yaml",
  "sha2 0.9.1",
@@ -1862,14 +1862,8 @@ checksum = "7038b67c941e23501573cb7242ffb08709abe9b11eb74bceff875bbda024a6a8"
 dependencies = [
  "libc",
  "libsodium-sys",
- "serde 1.0.114",
+ "serde",
 ]
-
-[[package]]
-name = "static_assertions"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "stop-token"

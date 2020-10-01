@@ -19,7 +19,7 @@ use fs_extra::dir::{copy, CopyOptions};
 use itertools::Itertools;
 use log::debug;
 use log::info;
-use north_common::manifest::Manifest;
+use north::manifest::Manifest;
 use rand::{AsByteSliceMut, RngCore};
 use serde_yaml;
 use sha2::{Digest, Sha256};
