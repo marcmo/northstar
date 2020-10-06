@@ -1763,7 +1763,7 @@ dependencies = [
  "structopt",
  "tempdir",
  "uuid",
- "zip 0.5.6",
+ "zip 0.5.6 (git+https://github.com/inorick/zip-rs.git?branch=add-extra-field-support)",
 ]
 
 [[package]]
@@ -2342,6 +2342,7 @@ dependencies = [
 [[package]]
 name = "zip"
 version = "0.5.6"
+source = "git+https://github.com/inorick/zip-rs.git?branch=add-extra-field-support#99707a58927ea4784f0478d2a96e3e3c82f14bf5"
 dependencies = [
  "byteorder",
  "bzip2",

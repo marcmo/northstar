@@ -9,6 +9,7 @@ VERBOSITY = LEVEL_DEBUG
 EXAMPLE_DIR = `pwd`.strip + '/examples'
 KEY_DIRECTORY = "#{EXAMPLE_DIR}/keys"
 KEY_ID = 'north'
+KEY_FILE = "#{KEY_DIRECTORY}/#{KEY_ID}.key"
 
 def debug(content)
   require 'colored'
@@ -156,9 +157,15 @@ namespace :examples do
           sh "cross build --release --bin #{name} --target #{target_arch}"
           cp "target/#{target_arch}/release/#{name}", target_dir
         end
-        create_arch_package(target_arch, target_dir, dir, registry, package_config)
+        create_arch_package_sextant(dir, registry, target_arch)
+        # create_arch_package(target_arch, target_dir, dir, registry, package_config)
       end
     end
+  end
+
+  def create_arch_package_sextant(container_src, out_dir, target_arch)
+    puts "target arch was: #{target_arch}"
+    # sh "target/release/sextant pack -d #{container_src} -o #{out_dir} -k #{KEY_FILE}"
   end
 
   desc 'Clean example builds'
