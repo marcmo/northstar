@@ -280,22 +280,38 @@ fn pack(
 
     let fsimg_path = &tmp_dir.path().join("fs").with_extension("img");
 
-    /* The list of pseudo files is target specific.
-     * Add /lib and lib64 on Linux systems.
-     * Add /system on Android. */
-    let mut pseudo_files = vec![
-        ("/tmp", 444),
-        ("/proc", 444),
-        ("/dev", 444),
-        ("/sys", 444),
-        ("/data", 777),
-    ];
-    if arch == Arch::Aarch64LinuxGnu || arch == Arch::X8664UnknownLinuxGnu {
-        pseudo_files.push(("/lib", 444));
-        pseudo_files.push(("/lib64", 444));
-    } else if arch.as_str() == "aarch64-linux-android" {
-        pseudo_files.push(("/system", 444));
+    let mut pseudo_files = vec![];
+    if !manifest.init.is_none() {
+        pseudo_files = vec![
+            ("/tmp", 444),
+            ("/proc", 444),
+            ("/dev", 444),
+            ("/sys", 444),
+            ("/data", 777),
+        ];
+        /* The list of pseudo files is target specific.
+         * Add /lib and lib64 on Linux systems.
+         * Add /system on Android. */
+        if arch == Arch::Aarch64LinuxGnu || arch == Arch::X8664UnknownLinuxGnu {
+            pseudo_files.push(("/lib", 444));
+            pseudo_files.push(("/lib64", 444));
+        } else if arch.as_str() == "aarch64-linux-android" {
+            pseudo_files.push(("/system", 444));
+        }
     }
+    if manifest.resources.is_some() {
+        for resource in manifest.resources.as_ref().unwrap() {
+            /* # in order to support mount points with multiple path segments, we need to call mksquashfs multiple times:
+             * e.gl to support res/foo in our image, we need to add /res/foo AND /res
+             * ==> mksquashfs ... -p "/res/foo d 444 1000 1000"  -p "/res d 444 1000 1000" */
+            let trail = path_trail(resource.mountpoint.as_path());
+            debug!("trail={:?}", trail);
+            for path in trail {
+                pseudo_files.push((path.as_os_str().to_str().unwrap(), 555));
+            }
+        }
+    }
+    debug!("pseudo_files={:?}", &pseudo_files);
 
     // create filesystem image
     let squashfs_comp = match std::env::consts::OS {
@@ -574,4 +590,14 @@ fn generate_hash_tree(
 fn round_up_to_multiple(number: usize, factor: usize) -> usize {
     let round_down_to_multiple = number + factor - 1;
     round_down_to_multiple - (round_down_to_multiple % factor)
+}
+
+fn path_trail(path: &Path) -> Vec<&Path> {
+    let mut current_path = path;
+    let mut ret = vec![];
+    while current_path.parent().is_some() {
+        ret.push(current_path);
+        current_path = current_path.parent().unwrap();
+    }
+    return ret;
 }
