@@ -18,6 +18,7 @@ mod npk;
 use crate::npk::pack_cmd;
 use anyhow::{anyhow, Error, Result};
 use log::info;
+use npk::Arch;
 use std::{path::PathBuf, str::FromStr};
 use structopt::StructOpt;
 
@@ -52,6 +53,8 @@ enum Opt {
         /// Registry dir
         #[structopt(short, long)]
         out: PathBuf,
+        #[structopt(short, long)]
+        arch: Arch,
     },
     /// Unpack Northstar containers
     Unpack {
@@ -77,7 +80,12 @@ fn main() -> Result<()> {
     let opt = Opt::from_args();
     info!("{:#?}", opt);
     match opt {
-        Opt::Pack { dir, out, key_file } => pack_cmd(&dir, &out, &key_file),
+        Opt::Pack {
+            dir,
+            out,
+            key_file,
+            arch,
+        } => pack_cmd(&dir, &out, &key_file, arch),
         _ => {
             unimplemented!();
         }

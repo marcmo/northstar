@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Context, Result};
+use core::fmt;
 use fs_extra::dir::{copy, CopyOptions};
 use itertools::Itertools;
 use log::debug;
@@ -9,6 +10,7 @@ use sodiumoxide::crypto::{
     sign,
     sign::{ed25519::SecretKey, keypair_from_seed, Seed, SEEDBYTES},
 };
+use std::str::FromStr;
 use std::{
     fs,
     fs::{File, OpenOptions},
@@ -17,6 +19,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
 };
+use structopt::StructOpt;
 use tempdir::TempDir;
 use uuid::Uuid;
 
@@ -26,15 +29,82 @@ enum FsType {
     EXT4,
 }
 
+#[derive(Debug, PartialEq, StructOpt)]
+#[structopt(about = "Northstar CLI")]
+pub enum Arch {
+    Aarch64LinuxAndroid,
+    Aarch64LinuxGnu,
+    Aarch64LinuxMusl,
+    X8664UnknownLinuxGnu,
+    X8664AppleDarwin,
+}
+
+impl fmt::Display for Arch {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl FromStr for Arch {
+    type Err = ArchError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "aarch64-linux-android" => Ok(Arch::Aarch64LinuxAndroid),
+            "aarch64-unknown-linux-gnu" => Ok(Arch::Aarch64LinuxGnu),
+            "aarch64-unknown-linux-musl" => Ok(Arch::Aarch64LinuxMusl),
+            "x86_64-unknown-linux-gnu" => Ok(Arch::X8664UnknownLinuxGnu),
+            "x86_64-apple-darwin" => Ok(Arch::X8664AppleDarwin),
+            _ => {
+                let details = "Invalid architecture";
+                Err(ArchError::InvalidArgs {
+                    details: details.to_string(),
+                })
+            }
+        }
+    }
+}
+
+impl Arch {
+    pub fn as_str(&self) -> &'static str {
+        match *self {
+            Arch::Aarch64LinuxAndroid => "aarch64-linux-android",
+            Arch::Aarch64LinuxGnu => "aarch64-unknown-linux-gnu",
+            Arch::Aarch64LinuxMusl => "aarch64-unknown-linux-musl",
+            Arch::X8664UnknownLinuxGnu => "x86_64-unknown-linux-gnu",
+            Arch::X8664AppleDarwin => "x86_64-apple-darwin",
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum ArchError {
+    InvalidArgs { details: String },
+}
+
+impl std::string::ToString for ArchError {
+    fn to_string(&self) -> String {
+        match self {
+            ArchError::InvalidArgs { details } => details.to_string(),
+        }
+    }
+}
+
 const DIGEST_SIZE: usize = 32;
 const BLOCK_SIZE: u64 = 4096;
 
 /// out_dir: where the npk should be packaged to (usually the registry directory)
-pub fn pack_cmd(container_src_dir: &Path, out_dir: &Path, key_file: &Path) -> Result<()> {
+pub fn pack_cmd(
+    container_src_dir: &Path,
+    out_dir: &Path,
+    key_file: &Path,
+    arch: Arch,
+) -> Result<()> {
     pack_containers(
         &out_dir,
         &container_src_dir,
         &key_file,
+        arch,
         FsType::SQUASHFS,
         1000,
         1000,
@@ -45,6 +115,7 @@ fn pack_containers(
     out_dir: &Path,
     container_src_dir: &Path,
     key_file: &Path,
+    arch: Arch,
     fs_type: FsType,
     uid: u32,
     gid: u32,
@@ -78,6 +149,7 @@ fn pack_containers(
         &container_src_dir,
         &out_dir,
         &signing_key,
+        arch,
         fs_type,
         uid,
         gid,
@@ -90,6 +162,7 @@ fn pack(
     src_dir: &Path,
     out_dir: &Path,
     signing_key: &SecretKey,
+    arch: Arch,
     fs_type: FsType,
     uid: u32,
     gid: u32,
@@ -108,7 +181,6 @@ fn pack(
 
     // load manifest
     let manifest_file_path = src_dir.join("manifest").with_extension("yaml");
-    let arch = "x86_64-unknown-linux-gnu"; // TODO: get as CLI parameter
     let manifest_file = std::fs::File::open(&manifest_file_path)
         .with_context(|| format!("Could not open manifest {}", manifest_file_path.display()))?;
     debug!("read manifest file {}", manifest_file_path.display());
@@ -218,10 +290,10 @@ fn pack(
         ("/sys", 444),
         ("/data", 777),
     ];
-    if arch == "aarch64-unknown-linux-gnu" || arch == "x86_64-unknown-linux-gnu" {
+    if arch == Arch::Aarch64LinuxGnu || arch == Arch::X8664UnknownLinuxGnu {
         pseudo_files.push(("/lib", 444));
         pseudo_files.push(("/lib64", 444));
-    } else if arch == "aarch64-linux-android" {
+    } else if arch.as_str() == "aarch64-linux-android" {
         pseudo_files.push(("/system", 444));
     }
 
@@ -445,7 +517,7 @@ fn generate_hash_tree(
             let mut sha256 = Sha256::new();
             sha256.update(salt);
 
-            let mut data_len = 0;
+            let data_len;
             if level_num == 0 {
                 let offset = hash_src_offset + hash_src_size - remaining;
                 data_len = std::cmp::min(remaining, block_size);
