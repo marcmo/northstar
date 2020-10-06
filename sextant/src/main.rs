@@ -17,7 +17,6 @@
 mod npk;
 use crate::npk::pack_cmd;
 use anyhow::{anyhow, Error, Result};
-use log::info;
 use npk::Arch;
 use std::{path::PathBuf, str::FromStr};
 use structopt::StructOpt;
@@ -78,7 +77,6 @@ enum Opt {
 fn main() -> Result<()> {
     env_logger::init();
     let opt = Opt::from_args();
-    info!("{:#?}", opt);
     match opt {
         Opt::Pack {
             dir,

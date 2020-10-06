@@ -2,7 +2,6 @@ use anyhow::{anyhow, Context, Result};
 use core::fmt;
 use fs_extra::dir::{copy, CopyOptions};
 use itertools::Itertools;
-use log::debug;
 use north::manifest::Manifest;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
@@ -120,13 +119,7 @@ fn pack_containers(
     uid: u32,
     gid: u32,
 ) -> Result<()> {
-    debug!("");
-    debug!("pack_containers called with");
-    debug!("out_dir={}", out_dir.display());
-    debug!("container_src_dir={}", container_src_dir.display());
-
     // read signing key
-    debug!("opening file {}", key_file.display());
     let metadata = key_file
         .metadata()
         .with_context(|| format!("Could not get info for {}", key_file.display()))?;
@@ -134,13 +127,10 @@ fn pack_containers(
     if !metadata.is_file() {
         return Err(anyhow!("{} is a directory, not a file", key_file.display()));
     }
+    let mut raw_signing_key_seed = [0u8; SEEDBYTES];
     let mut sign_key_file = File::open(&key_file)
         .with_context(|| format!("Key-file did not exist: {}", key_file.display()))?;
-    debug!("sign_key_file.len()={}", metadata.len());
-    let mut raw_signing_key_seed = [0u8; SEEDBYTES];
-    let read_bytes = sign_key_file.read(&mut raw_signing_key_seed)?;
-    debug!("read_bytes={}", read_bytes);
-    debug!("signing_key_seed={:02x?}", raw_signing_key_seed.to_vec());
+    sign_key_file.read(&mut raw_signing_key_seed)?;
     let signing_key_seed =
         Seed::from_slice(&raw_signing_key_seed).ok_or_else(|| anyhow!("Cannot parse seed"))?;
     let (_, signing_key) = keypair_from_seed(&signing_key_seed);
@@ -167,112 +157,44 @@ fn pack(
     uid: u32,
     gid: u32,
 ) -> Result<()> {
-    let component_name = src_dir
-        .components()
-        .last()
-        .unwrap()
-        .as_os_str()
-        .to_str()
-        .unwrap();
-    debug!("");
-    debug!("Packing '{}'", component_name);
-    debug!("src_dir={}", src_dir.display());
-    debug!("out_dir={}", out_dir.display());
-
     // load manifest
     let manifest_file_path = src_dir.join("manifest").with_extension("yaml");
     let manifest_file = std::fs::File::open(&manifest_file_path)
         .with_context(|| format!("Could not open manifest {}", manifest_file_path.display()))?;
-    debug!("read manifest file {}", manifest_file_path.display());
     let manifest: Manifest = serde_yaml::from_reader(manifest_file)
         .with_context(|| format!("Failed to parse {}", manifest_file_path.display()))?;
 
     let tmp_dir =
         TempDir::new("").with_context(|| "Could not create temporary directory".to_string())?;
 
-    debug!("find {}:", tmp_dir.path().display());
-    debug!(
-        "{}",
-        String::from_utf8_lossy(
-            &Command::new("find")
-                .arg(tmp_dir.path().as_os_str().to_str().unwrap())
-                .output()?
-                .stdout
-        )
-    );
-
     // copy root
-    debug!("copy root:");
     let root_dir = src_dir.join("root");
     let options = CopyOptions::new();
     let tmp_root_dir = tmp_dir.path().join("root");
     if root_dir.exists() {
-        debug!(
-            "copy {} to {}",
-            root_dir.display(),
-            tmp_dir.path().display()
-        );
         copy(&root_dir, &tmp_dir, &options)?;
     }
-    if !tmp_root_dir.exists() {
-        debug!("mkdir {}", tmp_root_dir.display());
-        fs::create_dir(&tmp_root_dir)
-            .with_context(|| "Could not create temporary directory".to_string())?;
-    }
-
-    debug!("find {}:", tmp_dir.path().display());
-    debug!(
-        "{}",
-        String::from_utf8_lossy(
-            &Command::new("find")
-                .arg(tmp_dir.path().as_os_str().to_str().unwrap())
-                .output()?
-                .stdout
-        )
-    );
+    if !tmp_root_dir.exists() {}
 
     // copy arch specific root
-    debug!("copy arch specific root:");
     let arch_dir = src_dir.join(format!("root-{}", arch));
-    debug!("arch_dir={}", arch_dir.display());
     if arch_dir.exists() {
         let arc_spec_files = fs::read_dir(arch_dir)?
             .map(|res| res.map(|e| e.path()))
             .filter_map(Result::ok)
             .collect::<Vec<PathBuf>>();
-        debug!("arc_spec_dirs.len()={}", arc_spec_files.len());
         for arc_spec_file in arc_spec_files {
-            debug!(
-                "copy {} to {}",
-                arc_spec_file.display(),
-                tmp_root_dir.display()
-            );
             // TODO: we assume copying a file and not a directory
             std::fs::copy(
                 &arc_spec_file,
                 &tmp_root_dir.join(arc_spec_file.file_name().unwrap()),
             )?;
-            // fs_extra::dir::copy(&arc_spec_file, &tmp_root_dir, &options)?;
         }
     }
 
-    debug!("find {}:", tmp_dir.path().display());
-    debug!(
-        "{}",
-        String::from_utf8_lossy(
-            &Command::new("find")
-                .arg(tmp_dir.path().as_os_str().to_str().unwrap())
-                .output()?
-                .stdout
-        )
-    );
-
     // write manifest
-    debug!("write manifest");
     let tmp_manifest_dir = tmp_dir.path().join("manifest").with_extension("yaml");
-    debug!("create file {}", tmp_manifest_dir.display());
     let tmp_manifest_file = File::create(&tmp_manifest_dir)?;
-    debug!("writing file {}", tmp_manifest_dir.display());
     serde_yaml::to_writer(tmp_manifest_file, &manifest)?;
 
     // remove existing containers
@@ -305,13 +227,11 @@ fn pack(
              * e.gl to support res/foo in our image, we need to add /res/foo AND /res
              * ==> mksquashfs ... -p "/res/foo d 444 1000 1000"  -p "/res d 444 1000 1000" */
             let trail = path_trail(resource.mountpoint.as_path());
-            debug!("trail={:?}", trail);
             for path in trail {
                 pseudo_files.push((path.as_os_str().to_str().unwrap(), 555));
             }
         }
     }
-    debug!("pseudo_files={:?}", &pseudo_files);
 
     // create filesystem image
     let squashfs_comp = match std::env::consts::OS {
@@ -337,43 +257,25 @@ fn pack(
                 gid
             ));
         }
-        dbg!(&cmd);
-        let cmd_output = cmd.output()?;
-        debug!("status={}", cmd_output.status);
-        debug!("stdout={}", String::from_utf8_lossy(&cmd_output.stdout));
-        debug!("stderr={}", String::from_utf8_lossy(&cmd_output.stderr));
+        cmd.output()?;
     } else if fs_type == FsType::EXT4 {
         unimplemented!()
     } else {
         unimplemented!("For unknown file types")
     }
-    debug!("fsimg_path={}", fsimg_path.as_os_str().to_str().unwrap());
     let filesystem_size = fs::metadata(fsimg_path)?.len();
 
     // append verity header and hash tree to filesystem image
     assert_eq!(filesystem_size % BLOCK_SIZE, 0);
     let data_blocks: u64 = filesystem_size / BLOCK_SIZE;
     let uuid = Uuid::new_v4();
-    debug!("uuid={}", &uuid);
-    debug!(
-        "uuid_decoded={:?}",
-        hex::decode(uuid.to_string().replace("-", ""))
-    );
     let mut salt = [0u8; DIGEST_SIZE];
     rand::thread_rng().fill_bytes(&mut salt);
-    debug!("filesystem_size={}", filesystem_size);
-    debug!("BLOCK_SIZE={}", BLOCK_SIZE);
-    debug!("data_blocks={}", &data_blocks);
     let (hash_level_offsets, tree_size) = calc_hash_level_offsets(
         filesystem_size as usize,
         BLOCK_SIZE as usize,
         DIGEST_SIZE as usize,
     );
-    debug!("tree_size={}", tree_size);
-    debug!("hash_level_offsets.len()={}", hash_level_offsets.len());
-    for hash_level_offset in &hash_level_offsets {
-        debug!("hash_level_offset={}", hash_level_offset);
-    }
 
     let (verity_hash, hash_tree) = generate_hash_tree(
         &File::open(&fsimg_path)?,
@@ -383,8 +285,6 @@ fn pack(
         &hash_level_offsets,
         tree_size,
     )?;
-    debug!("verity_hash.len()={}", verity_hash.len());
-    debug!("hash_tree.len()={}", hash_tree.len());
 
     {
         /* ['verity', 1, 1, uuid.gsub('-', ''), 'sha256', 4096, 4096, data_blocks, 32, salt, '']
@@ -434,25 +334,20 @@ fn pack(
         verity_hash.iter().format(""),
         filesystem_size
     );
-    debug!("hashes=\n{}", hashes);
 
     // sign hashes
     let signature = sign::sign_detached(hashes.as_bytes(), &signing_key);
-    debug!("signature.as_ref().len()={}", signature.as_ref().len());
     let signature_base64 = base64::encode(signature);
     let key_id = "north";
     let signatures = format!(
         "{}---\nkey: {}\nsignature: {}",
         &hashes, &key_id, &signature_base64
     );
-    debug!("signatures=\n{}", &signatures);
 
     // create zip
-    debug!("manifest.version={}", manifest.version);
     let path_to_npk = out_dir
         .join(format!("{}-{}-{}.", manifest.name, arch, manifest.version))
         .with_extension("npk");
-    debug!("path_to_npk=\n{}", &path_to_npk.display());
     let npk_file = File::create(&path_to_npk)?;
     let options =
         zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
@@ -545,11 +440,6 @@ fn generate_hash_tree(
                 let offset =
                     hash_level_offsets[level_num - 1] + hash_src_size as usize - remaining as usize;
                 data_len = block_size;
-                debug!("offset={}", &offset);
-                debug!("data_len={}", &data_len);
-                debug!("offset + data_len={}", offset + data_len as usize);
-                debug!("tree_size={}", &tree_size);
-                debug!("hash_ret.len()={}", hash_ret.len());
                 sha256.update(&hash_ret[offset..offset + data_len as usize]);
             }
 
